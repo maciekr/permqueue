@@ -2,14 +2,16 @@ package com.heyitworks.permqueue;
 
 import org.junit.Test;
 
+import javax.management.MBeanServer;
+import javax.management.ObjectInstance;
+import javax.management.ObjectName;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.CyclicBarrier;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 import static org.junit.Assert.*;
 
@@ -176,6 +178,104 @@ public class PersistentQueueTest {
         } finally {
             queueA.close(true);
         }
+    }
+
+    @Test
+    public void testMultiThreadedAddWhilePeeking() throws IOException, InterruptedException {
+        final PersistentQueue queueA = new BDBJEPersistentQueue("queueA", 100);
+        try {
+            drainQueue(queueA);
+            int threadCount = 50;
+
+            final CyclicBarrier barrier = new CyclicBarrier(2 * threadCount);
+            final CountDownLatch addLatch = new CountDownLatch(threadCount);
+            final CountDownLatch poolLatch = new CountDownLatch(threadCount);
+
+            ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
+            for (int i = 0; i < threadCount; i++) {
+                executorService.submit(new Runnable() {
+                    public void run() {
+                        try {
+                            barrier.await();
+                            while (addLatch.getCount() > 0) {
+                                ((BDBJEPersistentQueue) queueA).peek();
+                            }
+                            poolLatch.countDown();
+                        } catch (Throwable t) {
+                        }
+                    }
+                });
+            }
+
+            for (int i = 0; i < threadCount; i++) {
+                new Thread(String.valueOf(i)) {
+                    public void run() {
+                        try {
+                            barrier.await();
+                            queueA.add(getName());
+                            addLatch.countDown();
+                        } catch (Throwable e) {
+                            e.printStackTrace();
+                        }
+                    }
+                }.start();
+            }
+
+
+            addLatch.await(10, TimeUnit.SECONDS);
+            poolLatch.await(10, TimeUnit.SECONDS);
+            assertEquals(1l * threadCount, queueA.size());
+
+        } finally {
+            queueA.close(true);
+        }
+
+    }
+
+
+    @Test
+    public void testMBeanInterface() throws Exception {
+        String queueName = "queueA";
+        PersistentQueue queueA = new BDBJEPersistentQueue(queueName, 1000);
+        try {
+            drainQueue(queueA);
+
+            String anElement = new String("test mbean interface");
+            queueA.add(anElement);
+
+            BDBJEPersistentQueueMBean queueMBean = (BDBJEPersistentQueueMBean) queueA;
+            assertEquals(1L, queueMBean.size());
+            assertEquals(anElement, queueMBean.peek());
+            assertEquals(1L, queueMBean.size());
+        } finally {
+            queueA.close(true);
+        }
+    }
+
+    @Test
+    public void testMBeanRegistration() throws Exception {
+        String queueName = "queueA";
+        PersistentQueue queueA = new BDBJEPersistentQueue(queueName, 1000);
+        try {
+            drainQueue(queueA);
+            String anElement = new String("test mbean registration");
+            queueA.add(anElement);
+
+            MBeanServer mBeanServer = ManagementFactory
+                    .getPlatformMBeanServer();
+
+            Set<ObjectInstance> mBeanInstances = mBeanServer.queryMBeans(new ObjectName(
+                    "com.heyitworks.permqueue.PersistentQueue:name=" + queueName + ",*"), null);
+
+            assertEquals(1, mBeanInstances.size());
+            ObjectInstance mBeanInstance = mBeanInstances.iterator().next();
+            assertEquals(1L, mBeanServer.invoke(mBeanInstance.getObjectName(), "size", new Object[]{}, new String[]{}));
+            assertEquals(anElement, mBeanServer.invoke(mBeanInstance.getObjectName(), "peek", new Object[]{}, new String[]{}));
+            assertEquals(1L, mBeanServer.invoke(mBeanInstance.getObjectName(), "size", new Object[]{}, new String[]{}));
+        } finally {
+            queueA.close(true);
+        }
+
     }
 
     @Test
